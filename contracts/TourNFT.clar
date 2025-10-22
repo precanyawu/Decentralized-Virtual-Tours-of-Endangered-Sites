@@ -1,0 +1,102 @@
+(define-non-fungible-token tour-nft uint)
+(define-data-var last-id uint u0)
+(define-data-var authority-contract principal tx-sender)
+(define-data-var mint-fee uint u1000)
+(define-data-var max-tours uint u10000)
+(define-map tour-metadata uint { site-name: (string-utf8 100), description: (string-utf8 500), content-hash: (string-ascii 64), creator: principal })
+(define-map tour-royalties uint { recipient: principal, percentage: uint })
+(define-constant ERR-NOT-AUTHORIZED u100)
+(define-constant ERR-TOUR-NOT-FOUND u101)
+(define-constant ERR-INVALID-NAME u102)
+(define-constant ERR-INVALID-DESCRIPTION u103)
+(define-constant ERR-INVALID-HASH u104)
+(define-constant ERR-INVALID-PERCENTAGE u105)
+(define-constant ERR-MAX-TOURS-EXCEEDED u106)
+(define-constant ERR-INVALID-FEE u107)
+(define-constant ERR-TRANSFER-FAILED u108)
+
+(define-read-only (get-last-token-id)
+  (ok (var-get last-id)))
+
+(define-read-only (get-tour-metadata (id uint))
+  (map-get? tour-metadata id))
+
+(define-read-only (get-tour-royalty (id uint))
+  (map-get? tour-royalties id))
+
+(define-read-only (get-owner (id uint))
+  (ok (nft-get-owner? tour-nft id)))
+
+(define-read-only (get-mint-fee)
+  (ok (var-get mint-fee)))
+
+(define-private (validate-name (name (string-utf8 100)))
+  (if (and (> (len name) u0) (<= (len name) u100))
+      (ok true)
+      (err ERR-INVALID-NAME)))
+
+(define-private (validate-description (description (string-utf8 500)))
+  (if (and (> (len description) u0) (<= (len description) u500))
+      (ok true)
+      (err ERR-INVALID-DESCRIPTION)))
+
+(define-private (validate-content-hash (hash (string-ascii 64)))
+  (if (and (> (len hash) u0) (<= (len hash) u64))
+      (ok true)
+      (err ERR-INVALID-HASH)))
+
+(define-private (validate-percentage (percentage uint))
+  (if (and (> percentage u0) (<= percentage u100))
+      (ok true)
+      (err ERR-INVALID-PERCENTAGE)))
+
+(define-public (set-mint-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get authority-contract)) ERR-NOT-AUTHORIZED)
+    (asserts! (>= new-fee u0) ERR-INVALID-FEE)
+    (var-set mint-fee new-fee)
+    (ok true)))
+
+(define-public (set-authority-contract (new-authority principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get authority-contract)) ERR-NOT-AUTHORIZED)
+    (var-set authority-contract new-authority)
+    (ok true)))
+
+(define-public (mint (recipient principal) (site-name (string-utf8 100)) (description (string-utf8 500)) (content-hash (string-ascii 64)) (royalty-recipient principal) (royalty-percentage uint))
+  (let ((new-id (+ (var-get last-id) u1)))
+    (asserts! (< (var-get last-id) (var-get max-tours)) ERR-MAX-TOURS-EXCEEDED)
+    (try! (validate-name site-name))
+    (try! (validate-description description))
+    (try! (validate-content-hash content-hash))
+    (try! (validate-percentage royalty-percentage))
+    (try! (stx-transfer? (var-get mint-fee) tx-sender (var-get authority-contract)))
+    (try! (nft-mint? tour-nft new-id recipient))
+    (map-set tour-metadata new-id { site-name: site-name, description: description, content-hash: content-hash, creator: tx-sender })
+    (map-set tour-royalties new-id { recipient: royalty-recipient, percentage: royalty-percentage })
+    (var-set last-id new-id)
+    (print { event: "tour-minted", id: new-id, recipient: recipient, site-name: site-name })
+    (ok new-id)))
+
+(define-public (transfer (id uint) (sender principal) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender sender) ERR-NOT-AUTHORIZED)
+    (asserts! (is-some (nft-get-owner? tour-nft id)) ERR-TOUR-NOT-FOUND)
+    (try! (nft-transfer? tour-nft id sender recipient))
+    (ok true)))
+
+(define-public (burn (id uint))
+  (begin
+    (asserts! (is-eq tx-sender (unwrap! (nft-get-owner? tour-nft id) ERR-TOUR-NOT-FOUND)) ERR-NOT-AUTHORIZED)
+    (try! (nft-burn? tour-nft id tx-sender))
+    (map-delete tour-metadata id)
+    (map-delete tour-royalties id)
+    (ok true)))
+
+(define-public (update-royalty (id uint) (new-recipient principal) (new-percentage uint))
+  (let ((tour (map-get? tour-metadata id)))
+    (asserts! (is-some tour) ERR-TOUR-NOT-FOUND)
+    (asserts! (is-eq tx-sender (get creator (unwrap! tour ERR-TOUR-NOT-FOUND))) ERR-NOT-AUTHORIZED)
+    (try! (validate-percentage new-percentage))
+    (map-set tour-royalties id { recipient: new-recipient, percentage: new-percentage })
+    (ok true)))
